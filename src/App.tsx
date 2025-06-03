@@ -1,26 +1,44 @@
 import React from 'react';
-import logo from './logo.svg';
-import './App.css';
+import { BrowserRouter as Router, Routes, Route, Link, Navigate } from 'react-router-dom';
+import LoginPage from './pages/LoginPage';
+import ContentCreatePage from './pages/ContentCreatePage';
+import ContentListPage from './pages/ContentListPage';
+import MyContentPage from './pages/MyContentPage';
+import ContentDetailPage from './pages/ContentDetailPage';
+import { auth } from './firebase';
 
-function App() {
+const useAuth = () => {
+  const [user, setUser] = React.useState(() => auth.currentUser);
+  React.useEffect(() => {
+    const unsub = auth.onAuthStateChanged(setUser);
+    return () => unsub();
+  }, []);
+  return user;
+};
+
+const App: React.FC = () => {
+  const user = useAuth();
   return (
-    <div className="App">
-      <header className="App-header">
-        <img src={logo} className="App-logo" alt="logo" />
-        <p>
-          Edit <code>src/App.tsx</code> and save to reload.
-        </p>
-        <a
-          className="App-link"
-          href="https://reactjs.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Learn React
-        </a>
-      </header>
-    </div>
+    <Router>
+      <nav style={{ padding: 16, borderBottom: '1px solid #ddd' }}>
+        <Link to="/" style={{ marginRight: 16 }}>전체 컨텐츠</Link>
+        {user && <Link to="/create" style={{ marginRight: 16 }}>컨텐츠 생성</Link>}
+        {user && <Link to="/my" style={{ marginRight: 16 }}>내 컨텐츠</Link>}
+        {user ? (
+          <button onClick={() => auth.signOut()}>로그아웃</button>
+        ) : (
+          <Link to="/login">로그인/회원가입</Link>
+        )}
+      </nav>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/" element={<ContentListPage />} />
+        <Route path="/create" element={user ? <ContentCreatePage /> : <Navigate to="/login" />} />
+        <Route path="/my" element={user ? <MyContentPage /> : <Navigate to="/login" />} />
+        <Route path="/content/:id" element={<ContentDetailPage />} />
+      </Routes>
+    </Router>
   );
-}
+};
 
 export default App;
