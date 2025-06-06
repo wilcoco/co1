@@ -23,18 +23,23 @@ const App: React.FC = () => {
   const user = useAuth();
   return (
     <Router>
-      <nav style={{ padding: 16, borderBottom: '1px solid #ddd' }}>
-        <Link to="/" style={{ marginRight: 16 }}>전체 컨텐츠</Link>
-        {user && <Link to="/create" style={{ marginRight: 16 }}>컨텐츠 생성</Link>}
-        {user && <Link to="/my" style={{ marginRight: 16 }}>내 컨텐츠</Link>}
-        {user && <Link to="/my-invest" style={{ marginRight: 16 }}>나의 내역</Link>}
-        {user && <Link to="/approval-requests" style={{ marginRight: 16 }}>승인 요청</Link>}
-        {user && <Link to="/hash-compare" style={{ marginRight: 16 }}>예상 해시 비교</Link>}
-        {user ? (
-          <button onClick={() => auth.signOut()}>로그아웃</button>
-        ) : (
-          <Link to="/login">로그인/회원가입</Link>
-        )}
+      <nav style={{ padding: 16, borderBottom: '1px solid #ddd', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <Link to="/" style={{ marginRight: 16 }}>전체 컨텐츠</Link>
+          {user && <Link to="/create" style={{ marginRight: 16 }}>컨텐츠 생성</Link>}
+          {user && <Link to="/my" style={{ marginRight: 16 }}>내 컨텐츠</Link>}
+          {user && <Link to="/my-invest" style={{ marginRight: 16 }}>나의 내역</Link>}
+          {user && <Link to="/approval-requests" style={{ marginRight: 16 }}>승인 요청</Link>}
+          {user && <Link to="/hash-compare" style={{ marginRight: 16 }}>예상 해시 비교</Link>}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          {user ? (
+            <button onClick={() => auth.signOut()}>로그아웃</button>
+          ) : (
+            <Link to="/login">로그인/회원가입</Link>
+          )}
+          <span style={{ marginLeft: 16, color: '#888', fontWeight: 700, fontSize: 16 }}>버전 1.3</span>
+        </div>
       </nav>
       <Routes>
         <Route path="/login" element={<LoginPage />} />

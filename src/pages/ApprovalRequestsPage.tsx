@@ -77,157 +77,189 @@ const ApprovalRequestsPage: React.FC = () => {
     fetchPending();
   }, [fetchPending]);
 
+  // 클라이언트에서 모든 승인/합의/배당/해시 계산 및 append-only 기록
   const handleApprove = async (pending: PendingInvestment) => {
     setLoading(true);
     setMessage('');
     try {
-      const pRef = doc(db, 'pending_investments', pending.id);
-      const updatedApprovals = [...pending.approvals, auth.currentUser!.uid];
-      await updateDoc(pRef, { approvals: updatedApprovals });
-      // majority 체크 및 승인 처리
-      const pSnap = await getDoc(pRef);
+      // 1. 모든 승인 내역을 클라이언트에서 직접 불러옴
+      const pSnap = await getDoc(doc(db, 'pending_investments', pending.id));
       const pData = pSnap.data();
-      const majority = Math.ceil((pData?.approvals?.length || 0) / 2);
-      if (pData && pData.approvals.length >= majority && pData.status !== 'approved') {
-        // 1. investments 컬렉션에 신규 투자자 추가
-        await addDoc(collection(db, 'investments'), {
-          contentId: pending.contentId,
-          userId: pending.newInvestorId,
-          userEmail: pending.userEmail,
-          amount: pending.amount,
-          createdAt: pending.createdAt,
-          dividend: 0
-        });
-        // 2. 기존 투자자 dividend 업데이트
-        const invSnap = await getDocs(query(collection(db, 'investments'), where('contentId', '==', pending.contentId)));
-        const totalAmount = invSnap.docs.reduce((sum, doc) => sum + (doc.data().amount || 0), 0);
-        const batch = writeBatch(db);
-        invSnap.docs.forEach(docu => {
-          if (docu.data().userId !== pending.newInvestorId) {
-            const share = docu.data().amount / (totalAmount - pending.amount);
-            const dividend = Math.floor(pending.amount * share);
-            batch.update(doc(db, 'investments', docu.id), {
-              dividend: (docu.data().dividend || 0) + dividend
-            });
-          }
-        });
-        await batch.commit();
-        // 3. 펜딩 투자 status 'approved'로 변경
-        await updateDoc(pRef, { status: 'approved' });
-      }
-      // 승인 후 과반수 이상이면 투자 승인
-      // 기존 투자자 수 계산
+      const currentApprovals = pData?.approvals ?? [];
+      const newApprovals = [...currentApprovals, auth.currentUser!.uid];
+
+      // 2. 과반수 도달 여부를 클라이언트에서 직접 판단
+      // (기존 투자자 수 계산)
       const invQ = query(collection(db, 'investments'), where('contentId', '==', pending.contentId));
       const invSnap = await getDocs(invQ);
       const totalInvestors = invSnap.size;
-      // 예상 해시 계산: 과반 여부와 무관하게 승인 시마다 계산
-      // 실제 승인 시와 동일하게 배당 분배 시뮬레이션 포함
-      const allInvSnapForHash = await getDocs(query(collection(db, 'investments'), where('contentId', '==', pending.contentId)));
-      let allInvsForHash = allInvSnapForHash.docs.map(doc => ({
-        id: doc.id,
+      const majority = Math.ceil((totalInvestors + 1) / 2); // 신규 투자자 포함
+      const isMajority = newApprovals.length >= majority;
+
+      // 3. 과반수 도달 시 모든 상태 변화(투자 내역/배당/해시) 클라이언트에서 처리
+      let newInvestments = invSnap.docs.map(doc => ({
         userId: doc.data().userId,
         userEmail: doc.data().userEmail,
         amount: doc.data().amount,
-        createdAt: doc.data().createdAt?.toDate?.()?.toISOString?.() || doc.data().createdAt,
+        createdAt: doc.data().createdAt,
         dividend: doc.data().dividend || 0
       }));
-      // 신규 투자자(펜딩 투자) 추가 (dividend 0, id 없음)
-      allInvsForHash.push({
+      // 신규 투자자 추가
+      newInvestments.push({
         userId: pending.newInvestorId,
         userEmail: pending.userEmail,
         amount: pending.amount,
-        createdAt: pending.createdAt?.toDate?.()?.toISOString?.() || pending.createdAt,
-        dividend: 0,
-        id: undefined as any // 타입 충돌 방지용
+        createdAt: pending.createdAt,
+        dividend: 0
       });
-      // 배당 분배 시뮬레이션: 기존 투자자들에게 배당 지급
-      const oldInvs = allInvsForHash.filter(inv => inv.userId !== pending.newInvestorId);
-      // 기존 투자자(id가 있는 경우)만 배분 및 업데이트
-      const oldInvsWithId = oldInvs.filter(inv => 'id' in inv && inv.id);
-      const totalOldAmount = oldInvsWithId.reduce((sum, inv) => sum + inv.amount, 0);
-      if (oldInvsWithId.length > 0 && totalOldAmount > 0) {
-        for (const inv of oldInvsWithId) {
-          const share = inv.amount / totalOldAmount;
-          const dividend = Math.floor(pending.amount * share);
-          // 투자자 문서에 dividend 필드 누적 저장
-          const invRef = doc(db, 'investments', inv.id);
-          const prevDividend = inv.dividend || 0;
-          await updateDoc(invRef, { dividend: prevDividend + dividend });
-          // 투자자 캐시 지급
-          const userRef = doc(db, 'users', inv.userId);
-          const userSnap = await getDoc(userRef);
-          if (userSnap.exists()) {
-            const userData = userSnap.data();
-            const userCash = userData.cash ?? 0;
-            await updateDoc(userRef, { cash: userCash + dividend });
+
+      // 배당 분배 로직 클라이언트에서 직접 실행
+      const totalOldAmount = newInvestments
+        .filter(inv => inv.userId !== pending.newInvestorId)
+        .reduce((sum, inv) => sum + inv.amount, 0);
+      let dividendUpdates: { [userId: string]: number } = {};
+      if (totalOldAmount > 0) {
+        for (const inv of newInvestments) {
+          if (inv.userId !== pending.newInvestorId) {
+            const share = inv.amount / totalOldAmount;
+            const dividend = Math.floor(pending.amount * share);
+            dividendUpdates[inv.userId] = (dividendUpdates[inv.userId] || 0) + dividend;
+            inv.dividend = (inv.dividend || 0) + dividend;
           }
         }
       }
-      // 4. 해시 갱신 (getHashInputForContent로 완전히 통일)
-      const newInvSnap2 = await getDocs(query(collection(db, 'investments'), where('contentId', '==', pending.contentId)));
-      const newInvs2 = newInvSnap2.docs.map(doc => ({
-        userEmail: doc.data().userEmail,
-        amount: doc.data().amount
-      }));
-      const cDoc2 = await getDoc(doc(db, 'contents', pending.contentId));
-      const content2 = cDoc2.exists() ? { id: cDoc2.id, ...cDoc2.data() } as Content : null;
-      const hashInput2Obj = getHashInputForContent(content2, newInvs2);
-      console.log('[최신 해시 입력]', JSON.stringify(hashInput2Obj, null, 2));
-      const hash2 = await sha256Hash(JSON.stringify(hashInput2Obj));
-      await updateDoc(doc(db, 'contents', pending.contentId), { latestHash: hash2 });
-      // 5. 로컬 해시도 갱신
-      if (auth.currentUser) {
-        localStorage.setItem(`content_latestHash_${pending.contentId}_${auth.currentUser.uid}`, hash2);
-      }
-      setMessage('과반 승인! 투자 승인 및 해시 갱신 완료.');
-    // 승인 완료 후 최종 해시 구조 콘솔 출력 (try 블록 내부에 위치)
-    if (pending.contentId && contentMap[pending.contentId]) {
-      const invSnap = await getDocs(query(collection(db, 'investments'), where('contentId', '==', pending.contentId)));
-      let invs = invSnap.docs.map(doc => ({
-        userEmail: doc.data().userEmail,
-        amount: doc.data().amount
-      }));
-      // 정렬: 예상/최종 해시 모두 userEmail, amount 기준
-      invs.sort((a, b) => {
-        if (a.userEmail < b.userEmail) return -1;
-        if (a.userEmail > b.userEmail) return 1;
-        if (a.amount < b.amount) return -1;
-        if (a.amount > b.amount) return 1;
-        return 0;
-      });
-      const hashInputObj = getHashInputForContent(contentMap[pending.contentId], invs);
-      console.log('[최종 해시 구조]', JSON.stringify(hashInputObj, null, 2));
-    }
-  } catch (e) {
-    setMessage('오류: ' + (e instanceof Error ? e.message : String(e)));
-  } finally {
-    setLoading(false);
-    fetchPending(); // 새로고침 없이 펜딩 목록만 갱신
-  }
-};
 
+      // 3-1. Firestore에 신규 투자자 추가
+      console.log('[디버그] handleApprove() 시작, pending:', JSON.stringify(pending, null, 2));
+      console.log('[디버그] handleApprove() newInvestments:', JSON.stringify(newInvestments, null, 2));
+      await addDoc(collection(db, 'investments'), {
+        userId: pending.newInvestorId,
+        userEmail: pending.userEmail,
+        amount: pending.amount,
+        createdAt: pending.createdAt,
+        dividend: 0,
+        contentId: pending.contentId // 반드시 포함!
+      });
+      console.log('[디버그] 신규 투자자 Firestore 추가 완료');
+      // 3-2. 기존 투자자 배당 업데이트
+      for (const [userId, dividend] of Object.entries(dividendUpdates)) {
+        const q = query(collection(db, 'investments'), where('contentId', '==', pending.contentId), where('userId', '==', userId));
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          await updateDoc(doc(db, 'investments', snap.docs[0].id), { dividend });
+        }
+      }
+      // Firestore에 투자자 추가/배당 업데이트가 완전히 반영될 때까지 약간 대기
+      await new Promise(res => setTimeout(res, 500));
+      const cDoc = await getDoc(doc(db, 'contents', pending.contentId));
+      const content = cDoc.exists() ? { id: cDoc.id, ...cDoc.data() } as Content : null;
+      const prevHash = content?.latestHash || '';
+      // Firestore에서 최신 investments fetch (예상 해시와 완전히 동일하게)
+      const invSnapForHash = await getDocs(query(collection(db, 'investments'), where('contentId', '==', pending.contentId)));
+      const invsForHash = invSnapForHash.docs.map(doc => ({
+        userEmail: doc.data().userEmail,
+        amount: doc.data().amount,
+        // createdAt, dividend 등 타입 통일
+        createdAt: typeof doc.data().createdAt === 'string'
+          ? doc.data().createdAt
+          : doc.data().createdAt?.toDate?.()?.toISOString?.() || '' + doc.data().createdAt,
+        dividend: typeof doc.data().dividend === 'number' ? doc.data().dividend : 0
+      }));
+      console.log('[디버그] Firestore에서 fetch한 investments:', JSON.stringify(invsForHash, null, 2));
+      // 정렬 및 content 구조까지 동일하게 맞춤
+      const hashInputObj = getHashInputForContent(content, invsForHash);
+      const newHash = await sha256Hash(JSON.stringify(hashInputObj));
+
+      // 예상 해시와 실제(최종) 해시 콘솔 비교
+      try {
+        // 예상 해시 계산용: pending 투자자를 추가해서 getHashInputForContent 호출 (calculateExpectedHash와 동일하게)
+        const invSnapForExpected = await getDocs(query(collection(db, 'investments'), where('contentId', '==', pending.contentId)));
+        const invsForExpected = invSnapForExpected.docs.map(doc => ({
+          userEmail: doc.data().userEmail,
+          amount: doc.data().amount,
+          createdAt: typeof doc.data().createdAt === 'string'
+            ? doc.data().createdAt
+            : doc.data().createdAt?.toDate?.()?.toISOString?.() || '' + doc.data().createdAt,
+          dividend: typeof doc.data().dividend === 'number' ? doc.data().dividend : 0
+        }));
+        // pending 투자자 추가
+        invsForExpected.push({
+          userEmail: pending.userEmail,
+          amount: pending.amount,
+          createdAt: typeof pending.createdAt === 'string'
+            ? pending.createdAt
+            : pending.createdAt?.toDate?.()?.toISOString?.() || '' + pending.createdAt,
+          dividend: 0
+        });
+        // 정렬 및 구조 동일하게
+        const expectedHashInputObj = getHashInputForContent(content, invsForExpected);
+        const expectedHash = await sha256Hash(JSON.stringify(expectedHashInputObj));
+        console.log('[해시 비교] 예상 해시:', expectedHash, '\n실제(최종) 해시:', newHash);
+        console.log('[해시 비교] 예상 해시 입력:', JSON.stringify(expectedHashInputObj, null, 2));
+        console.log('[해시 비교] 실제(최종) 해시 입력:', JSON.stringify(hashInputObj, null, 2));
+        // 실제로 예상 해시 계산에 사용된 investments 배열
+        console.log('[해시 비교] 예상 해시용 investments:', JSON.stringify(invsForExpected, null, 2));
+        // 실제로 최종 해시 계산에 사용된 investments 배열
+        console.log('[해시 비교] 실제(최종) 해시용 investments:', JSON.stringify(invsForHash, null, 2));
+      } catch (e) {
+        console.warn('[해시 비교] 예상 해시 계산 실패:', e);
+      }
+
+      // 5. (추후 확장) 내 개인키로 전자서명 생성 (지금은 구조만)
+      // const signature = await signWithMyPrivateKey(newHash);
+
+      // 6. 서버에는 append-only로 "서명된 내역"만 저장
+      await addDoc(collection(db, 'approval_chain'), {
+        contentId: pending.contentId,
+        prevHash,
+        newHash,
+        investments: newInvestments,
+        dividendUpdates,
+        approvals: newApprovals,
+        // signatures: [signature], // 추후 전자서명 추가
+        timestamp: Date.now(),
+        status: isMajority ? 'approved' : 'pending',
+        approvedBy: isMajority ? newApprovals : [],
+        pendingId: pending.id
+      });
+
+      // 7. pending_investments에 approvals만 업데이트(상태 판단은 서버가 하지 않음)
+      await updateDoc(doc(db, 'pending_investments', pending.id), { approvals: newApprovals });
+
+      setMessage(isMajority ? '과반 승인! 투자 승인 및 해시 갱신 완료.' : '승인 처리 완료. 아직 과반 미달');
+    } catch (e) {
+      setMessage('오류: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setLoading(false);
+      fetchPending();
+    }
+  };
+
+
+  // 클라이언트에서 거부 판단 후 append-only로 기록
   const handleReject = async (pending: PendingInvestment) => {
     setLoading(true);
     setMessage('');
     try {
-      const pRef = doc(db, 'pending_investments', pending.id);
-      await updateDoc(pRef, { status: 'rejected' });
-      // 투자금 환불
-      const userRef = doc(db, 'users', pending.newInvestorId);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists()) {
-        const userData = userSnap.data();
-        const userCash = userData.cash ?? 0;
-        await updateDoc(userRef, { cash: userCash + pending.amount });
-      }
+      // 1. 거부 내역을 approval_chain에 append-only로 기록
+      await addDoc(collection(db, 'approval_chain'), {
+        contentId: pending.contentId,
+        type: 'reject',
+        rejectedBy: auth.currentUser!.uid,
+        pendingId: pending.id,
+        timestamp: Date.now()
+      });
+      // 2. pending_investments에 status만 업데이트(실제 판단은 클라이언트)
+      await updateDoc(doc(db, 'pending_investments', pending.id), { status: 'rejected' });
       setMessage('거부 처리 완료.');
     } catch (e) {
       setMessage('오류: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setLoading(false);
-      fetchPending(); // 거부 후 펜딩 목록 새로고침
+      fetchPending();
     }
   };
+
 
   return (
     <div style={{ maxWidth: 800, margin: 'auto', padding: 40 }}>
@@ -238,6 +270,7 @@ const ApprovalRequestsPage: React.FC = () => {
           </span>
         )}
         {/* 여기에 기존 로그인/로그아웃 버튼이 있다면 그 옆에 붙습니다 */}
+        <span style={{ marginLeft: 16, color: '#888', fontWeight: 700, fontSize: 16 }}>버전 1.3</span>
       </div>
       <h2>투자 승인 요청</h2>
       {message && <div style={{ color: 'green', marginBottom: 16 }}>{message}</div>}
