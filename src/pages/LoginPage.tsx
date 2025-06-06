@@ -13,7 +13,17 @@ const LoginPage: React.FC = () => {
     setError('');
     try {
       if (isRegister) {
-        await createUserWithEmailAndPassword(auth, email, password);
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        // 회원가입 시 1000 캐시 지급
+        const { user } = cred;
+        const { getFirestore, doc, setDoc } = await import('firebase/firestore');
+        const db = getFirestore();
+        await setDoc(doc(db, 'users', user.uid), {
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName || '',
+          cash: 1000,
+        });
       } else {
         await signInWithEmailAndPassword(auth, email, password);
       }
@@ -27,7 +37,21 @@ const LoginPage: React.FC = () => {
     setError('');
     try {
       const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
+      const result = await signInWithPopup(auth, provider);
+      // 구글 로그인 시 users 문서 없으면 cash: 1000으로 생성
+      const { user } = result;
+      const { getFirestore, doc, getDoc, setDoc } = await import('firebase/firestore');
+      const db = getFirestore();
+      const userRef = doc(db, 'users', user.uid);
+      const userSnap = await getDoc(userRef);
+      if (!userSnap.exists()) {
+        await setDoc(userRef, {
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName || '',
+          cash: 1000,
+        });
+      }
     } catch (err: any) {
       setError(err.message);
     }
